@@ -1,0 +1,8 @@
+{
+  "name": "launchkit",
+  "version": "0.1.0",
+  "description": "Take a finished web app live: domain, DNS, hosting, Search Console, analytics, sitemap and an SEO audit.",
+  "author": { "name": "ThinkSupratik", "url": "https://thinksupratik.com" },
+  "license": "MIT",
+  "keywords": ["launch", "seo", "search-console", "vercel", "cloudflare", "vibe-coding"]
+}

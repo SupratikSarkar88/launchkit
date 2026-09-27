@@ -10,7 +10,13 @@ python3 launch.py audit myapp.com                       # any site, any stack
 python3 launch.py report myapp.com                      # Search Console clicks + top queries
 ```
 
-**No commands to remember:** run `python3 launch.py` (or double-click `Launchkit.command` on a Mac) for a menu. Suggest or check names, **type the number of the one you like**, answer four yes/no questions, confirm the price by typing `BUY`, and it launches.
+**The easy way:**
+
+```bash
+python3 launch.py yourdomain.com
+```
+
+It asks which GitHub repo and four yes/no questions. The first time only, it opens Cloudflare, Vercel and Google in your browser, tells you what to click and saves the access. It shows the price, and after you type `BUY` it does everything else. `python3 launch.py` alone opens a menu (suggest names, check names, launch, audit, report).
 
 Not a coder? Install it as a Claude plugin and say *"launch my app"*. Claude walks you through the rest (see [Use with Claude](#use-with-claude)).
 
@@ -29,17 +35,17 @@ Not a coder? Install it as a Claude plugin and say *"launch my app"*. Claude wal
 | 8 | Wait until live; submit the sitemap; ping Bing via IndexNow | Search Console API, IndexNow |
 | 9 | Audit: titles, descriptions, canonical, social cards, robots, sitemap, redirects, 404s | plain HTTP |
 
-Every step is saved to `state/<domain>.json`. If anything fails, run the same command again and it continues where it stopped. Python 3.9+, no dependencies (except the one-time Google login helper).
+Every step is saved to `state/<domain>.json`. If anything fails, run the same command again and it continues where it stopped. Python 3.9+, no dependencies.
 
 ## One-time setup (~30 minutes)
 
-1. `cp .env.example .env` and fill it in. Each key has instructions inline.
+Run `python3 launch.py setup` (or just launch a domain). It walks you through each item below in the browser and saves the keys to `.env`. You can still fill `.env` by hand from `.env.example`.
+
+1. **Cloudflare** API token (the script says which permissions).
 2. **Cloudflare** → Registrar: add a payment method and default contact, accept the agreement.
 3. **Vercel** → install the GitHub app with access to your repos.
 4. **Google Cloud** → enable Site Verification, Search Console and Analytics Admin APIs. OAuth consent screen: *External*, then **Publish** (in Testing mode the login expires after 7 days). Create a *Desktop* OAuth client, then:
-   ```bash
-   pip install google-auth-oauthlib && python3 google_auth_setup.py
-   ```
+   The script opens each page and then signs you in to Google. Nothing to install.
 5. **Bing Webmaster Tools** → "Import from Google Search Console". Once, covers every future site.
 
 ## What your app must include

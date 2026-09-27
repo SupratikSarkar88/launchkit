@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """launchkit - take a built product from "repo on GitHub" to "live, indexed, measured".
 
-Commands (run with no arguments for an interactive menu)
+Easiest:  python3 launch.py FireEnough.com     (asks for anything it needs, then does everything)
+          python3 launch.py                     (menu)
+
+Commands
   suggest <keywords ...> [--limit 20]            available domain ideas + price (Cloudflare Registrar)
   check  <name> [name ...] [--tlds com,io,app]   availability + price for names you already have
   launch <domain> --repo owner/repo [--buy]       buy -> DNS -> Vercel -> Search Console -> GA4 [-> PostHog] -> sitemap -> audit
@@ -27,7 +30,8 @@ def load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                v = re.split(r"\s+#", v, 1)[0].strip().strip('"').strip("'")   # drop inline "# comment"
+                if v: os.environ.setdefault(k.strip(), v)
 
 def env(name, required=True):
     v = os.environ.get(name, "")
@@ -446,23 +450,157 @@ def pick_and_launch(options):
     v = ask("Type a number to launch that domain, or press Enter to go back")
     if v.isdigit() and 1 <= int(v) <= len(options): launch_flow(options[int(v) - 1][0])
 
+# ---------------------------------------------------------------- guided account connection
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/siteverification", "https://www.googleapis.com/auth/webmasters",
+                 "https://www.googleapis.com/auth/analytics.edit"]
+
+def set_env(key, value):
+    f = HERE / ".env"
+    lines = f.read_text().splitlines() if f.exists() else []
+    out, done = [], False
+    for ln in lines:
+        if re.match(rf"^\s*{re.escape(key)}\s*=", ln): out.append(f"{key}={value}"); done = True
+        else: out.append(ln)
+    if not done: out.append(f"{key}={value}")
+    f.write_text("\n".join(out) + "\n"); os.environ[key] = value
+
+def secret(q):
+    import getpass
+    return getpass.getpass(f"  {q} (hidden while you paste): ").strip()
+
+def open_page(url, what):
+    import webbrowser
+    print(f"\n  Opening {what}:\n  {url}")
+    try: webbrowser.open(url)
+    except Exception: pass
+
+def connect_cloudflare():
+    print("\n  -- Cloudflare (buys the domain and sets DNS) --")
+    open_page("https://dash.cloudflare.com/profile/api-tokens", "Cloudflare API tokens")
+    print("  Click 'Create Token' > 'Create Custom Token', name it launchkit, and add these permissions:\n"
+          "    Account > Registrar (domains) > Edit\n    Zone > Zone > Read\n    Zone > DNS > Edit\n"
+          "  Zone resources: All zones. Then 'Continue to summary' > 'Create Token' and copy it.")
+    while True:
+        tok = secret("Paste the Cloudflare token")
+        try:
+            r = http("GET", CF + "/user/tokens/verify", tok)
+            if r.get("result", {}).get("status") == "active": break
+        except HTTPError: pass
+        print("  That token didn't verify - try copying it again.")
+    set_env("CF_API_TOKEN", tok)
+    accts = []
+    try: accts = http("GET", CF + "/accounts", tok).get("result") or []
+    except HTTPError: pass
+    if len(accts) == 1: acct = accts[0]["id"]
+    else:
+        for i, a_ in enumerate(accts, 1): print(f"   {i}) {a_['name']}  {a_['id']}")
+        v = ask("Account number from the list, or paste your Account ID (it's in the dashboard URL after dash.cloudflare.com/)")
+        acct = accts[int(v) - 1]["id"] if v.isdigit() and 1 <= int(v) <= len(accts) else v
+    set_env("CF_ACCOUNT_ID", acct)
+    print("  Cloudflare connected. To buy domains through it you also need, once, in the dashboard under Domains > Registrar:\n"
+          "  a payment method, a default contact, and the registration agreement accepted.")
+
+def connect_vercel():
+    print("\n  -- Vercel (hosting) --")
+    open_page("https://vercel.com/account/tokens", "Vercel tokens")
+    print("  Create a token (name: launchkit, scope: your account/team, no expiry or long expiry) and copy it.")
+    while True:
+        tok = secret("Paste the Vercel token")
+        try: user = http("GET", "https://api.vercel.com/v2/user", tok).get("user", {}); break
+        except HTTPError: print("  That token didn't work - try again.")
+    set_env("VERCEL_TOKEN", tok)
+    if user.get("defaultTeamId"): set_env("VERCEL_TEAM_ID", user["defaultTeamId"])
+    print(f"  Vercel connected as {user.get('username') or user.get('email')}.")
+    open_page("https://github.com/apps/vercel/installations/new", "the Vercel GitHub app")
+    print("  Make sure Vercel can see your GitHub repos (choose 'All repositories'). Skip if already done.")
+    ask("Press Enter when done")
+
+def google_login():
+    import http.server as _hs, secrets as _s, socket, webbrowser
+    sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
+    redirect, state, got = f"http://127.0.0.1:{port}", _s.token_urlsafe(16), {}
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode({
+        "client_id": env("GOOGLE_CLIENT_ID"), "redirect_uri": redirect, "response_type": "code",
+        "scope": " ".join(GOOGLE_SCOPES), "access_type": "offline", "prompt": "consent", "state": state})
+    class H(_hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
+            if q.get("state") == state: got.update(q)
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
+            self.wfile.write(b"<h2>launchkit: Google connected. You can close this tab.</h2>")
+        def log_message(self, *a): pass
+    srv = _hs.HTTPServer(("127.0.0.1", port), H); srv.timeout = 300
+    print("\n  A Google sign-in page is opening. Choose your account and allow access.\n"
+          "  If Google says the app isn't verified: click 'Advanced' > 'Go to launchkit' (it's your own app).")
+    webbrowser.open(url); print(f"  (If it didn't open: {url})")
+    t0 = time.time()
+    while not got and time.time() - t0 < 300: srv.handle_request()
+    srv.server_close()
+    if "code" not in got: die(f"Google sign-in didn't complete: {got.get('error', 'timed out')}")
+    r = http("POST", "https://oauth2.googleapis.com/token", form={
+        "code": got["code"], "client_id": env("GOOGLE_CLIENT_ID"), "client_secret": env("GOOGLE_CLIENT_SECRET"),
+        "redirect_uri": redirect, "grant_type": "authorization_code"})
+    if not r.get("refresh_token"): die("Google didn't return a refresh token - run Connect Google again.")
+    set_env("GOOGLE_REFRESH_TOKEN", r["refresh_token"]); _gtok.clear()
+    print("  Google connected.")
+
+def connect_google_client():
+    print("\n  -- Google (Search Console + Analytics) - one-time app setup, ~5 minutes --")
+    steps = [("https://console.cloud.google.com/projectcreate", "1) Create a project called launchkit (then make sure it's selected at the top)"),
+             ("https://console.cloud.google.com/apis/library/siteverification.googleapis.com", "2) Click Enable"),
+             ("https://console.cloud.google.com/apis/library/searchconsole.googleapis.com", "3) Click Enable"),
+             ("https://console.cloud.google.com/apis/library/analyticsadmin.googleapis.com", "4) Click Enable"),
+             ("https://console.cloud.google.com/auth/overview", "5) Get started: app name launchkit, your email, Audience: External, finish"),
+             ("https://console.cloud.google.com/auth/audience", "6) Click 'Publish app' (otherwise Google logs you out every 7 days)"),
+             ("https://console.cloud.google.com/auth/clients/create", "7) Application type: Desktop app, name launchkit, Create - keep the popup open")]
+    for url, text in steps:
+        open_page(url, text.split(") ", 1)[1].split(" (")[0]); print(f"  {text}"); ask("Press Enter when done")
+    set_env("GOOGLE_CLIENT_ID", ask("Paste the Client ID"))
+    set_env("GOOGLE_CLIENT_SECRET", secret("Paste the Client secret"))
+
+def connect_ga4():
+    try: accts = g("GET", "https://analyticsadmin.googleapis.com/v1beta/accounts").get("accounts", [])
+    except HTTPError: accts = []
+    if not accts:
+        open_page("https://analytics.google.com/analytics/web/#/provision", "Google Analytics")
+        print("  You don't have a Google Analytics account yet. Create one there (account name is enough; you can skip the property).")
+        ask("Press Enter when done")
+        try: accts = g("GET", "https://analyticsadmin.googleapis.com/v1beta/accounts").get("accounts", [])
+        except HTTPError: accts = []
+    if not accts: print("  Still no Analytics account - launching without Google Analytics this time."); return False
+    pick = accts[0]
+    if len(accts) > 1:
+        for i, a_ in enumerate(accts, 1): print(f"   {i}) {a_.get('displayName')}")
+        v = ask("Which Analytics account", "1"); pick = accts[int(v) - 1] if v.isdigit() and 1 <= int(v) <= len(accts) else accts[0]
+    set_env("GA4_ACCOUNT_ID", pick["name"].split("/")[-1]); return True
+
+def connect_accounts(want_ga=True, want_posthog=False):
+    """Ask for whatever access is missing. Each piece is asked once and saved to .env."""
+    if not (HERE / ".env").exists() and (HERE / ".env.example").exists(): (HERE / ".env").write_text((HERE / ".env.example").read_text())
+    load_env()
+    if not (os.environ.get("CF_API_TOKEN") and os.environ.get("CF_ACCOUNT_ID")): connect_cloudflare()
+    if not os.environ.get("VERCEL_TOKEN"): connect_vercel()
+    if not (os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET")): connect_google_client()
+    if not os.environ.get("GOOGLE_REFRESH_TOKEN"): google_login()
+    ga_ok = True
+    if want_ga and not os.environ.get("GA4_ACCOUNT_ID"): ga_ok = connect_ga4()
+    if want_posthog and not os.environ.get("POSTHOG_PROJECT_KEY"):
+        open_page("https://us.posthog.com/settings/project", "PostHog project settings")
+        set_env("POSTHOG_PROJECT_KEY", ask("Paste the Project API key (starts with phc_)"))
+    return ga_ok
+
 def launch_flow(domain):
     domain = domain.lower().strip()
     print(f"\n  Launching {domain}\n")
-    missing = [k for k in ("CF_API_TOKEN", "CF_ACCOUNT_ID", "VERCEL_TOKEN", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
-               if not os.environ.get(k)]
-    if missing:
-        print(f"  Setup isn't finished - missing in .env: {', '.join(missing)}")
-        if "GOOGLE_REFRESH_TOKEN" in missing and len(missing) == 1: print("  Use menu option 6 (Connect Google) first.")
-        return
     repo = ask("GitHub repo for this app (owner/repo)")
     if "/" not in repo: print("  Need it as owner/repo, e.g. SupratikSarkar88/myapp"); return
+    nextjs = yes("Is it a Next.js app?"); ga = yes("Set up Google Analytics?")
+    ph = yes("Set up PostHog (user sessions / replay)?", False); mail = yes("Will this domain send email?", False)
+    if not connect_accounts(want_ga=ga, want_posthog=ph): ga = False
     ns = argparse.Namespace(domain=domain, repo=repo, buy=False, canonical="www", sitemap="/sitemap.xml",
                             ga_env="NEXT_PUBLIC_GA_ID", tz="Asia/Kolkata", posthog_new=False,
-                            framework="nextjs" if yes("Is it a Next.js app?") else "",
-                            no_ga=not yes("Set up Google Analytics?"),
-                            posthog=yes("Set up PostHog (shared project)?", False),
-                            email=yes("Will this domain send email?", False))
+                            framework="nextjs" if nextjs else "", no_ga=not ga, posthog=ph, email=mail)
+    print()
     if not cf_zone(domain):
         info = (cf_check([domain]) or [{}])[0]
         if not info.get("registrable"): print(f"\n  {domain} can't be bought: {info.get('reason', 'not available')}"); return
@@ -478,7 +616,7 @@ def launch_flow(domain):
 def cmd_menu(_a=None):
     items = [("Suggest domain names from keywords", "suggest"), ("Check names I already have", "check"),
              ("Launch with a domain I've chosen", "launch"), ("Audit a live site", "audit"),
-             ("Search Console report", "report"), ("Connect / reconnect Google", "google")]
+             ("Search Console report", "report"), ("Connect accounts / reconnect Google", "google")]
     while True:
         print("\n  ==========  launchkit  ==========")
         for i, (label, _) in enumerate(items, 1): print(f"   {i}) {label}")
@@ -496,7 +634,7 @@ def cmd_menu(_a=None):
                 print(f"\n  Audit {u}\n"); run_audit(u)
             elif action == "report": cmd_report(argparse.Namespace(domain=ask("Domain"), days=28))
             elif action == "google":
-                import subprocess; subprocess.run([sys.executable, str(HERE / "google_auth_setup.py")])
+                connect_accounts(want_ga=False) if not os.environ.get("GOOGLE_CLIENT_ID") else google_login()
         except SystemExit: pass          # die() prints the error; stay in the menu
         except KeyboardInterrupt: print("\n  Stopped.")
         except Exception as e: print(f"\n  ERROR: {e}")
@@ -534,13 +672,18 @@ def main():
     l.add_argument("--email", action="store_true", help="domain will send mail: skip SPF -all / DMARC reject")
     au = sub.add_parser("audit"); au.add_argument("url")
     rp = sub.add_parser("report"); rp.add_argument("domain"); rp.add_argument("--days", type=int, default=28)
-    sub.add_parser("menu")
+    sub.add_parser("menu"); sub.add_parser("setup")
     if len(sys.argv) == 1: sys.argv.append("menu")   # no arguments = interactive menu
+    if len(sys.argv) == 2 and "." in sys.argv[1] and not sys.argv[1].startswith("-"):   # launch.py FireEnough.com
+        try: launch_flow(sys.argv[1])
+        except KeyboardInterrupt: print("\n  Stopped. Run the same command again to continue.")
+        return
     a = ap.parse_args()
     if a.cmd == "audit":
         u = a.url if a.url.startswith("http") else f"https://{a.url}"
         print(f"\nAudit {u}\n"); sys.exit(1 if run_audit(u) else 0)
-    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "report": cmd_report, "menu": cmd_menu}[a.cmd](a)
+    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "report": cmd_report, "menu": cmd_menu,
+     "setup": lambda _a: connect_accounts()}[a.cmd](a)
 
 if __name__ == "__main__":
     main()

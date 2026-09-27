@@ -19,7 +19,7 @@ Ask for 3-10 name ideas (or suggest some from what the app does). Run `python3 l
 ## 3. Launch
 State the exact domain and first-year price and get an explicit "yes, buy it". Only then run:
 `python3 launch.py launch <domain> --repo <owner/repo> --buy`
-Add `--email` if the domain will send mail, `--no-ga` if they don't want Google Analytics, `--framework ''` if the app is not Next.js.
+Add `--posthog` if they want PostHog product analytics / session replay (free PostHog = one shared project; `--posthog-new` creates one per app on a paid PostHog org), `--email` if the domain will send mail, `--no-ga` if they don't want Google Analytics, `--framework ''` if the app is not Next.js.
 Waiting steps (registration, Google verification, going live) can take many minutes. If the command stops or times out, run the same command again; it resumes.
 
 ## 4. Finish

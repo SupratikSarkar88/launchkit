@@ -3,7 +3,7 @@
 
 Commands
   check  <name> [name ...] [--tlds com,io,app]   availability + price (Cloudflare Registrar)
-  launch <domain> --repo owner/repo [--buy]       buy -> DNS -> Vercel -> Search Console -> GA4 -> sitemap -> audit
+  launch <domain> --repo owner/repo [--buy]       buy -> DNS -> Vercel -> Search Console -> GA4 [-> PostHog] -> sitemap -> audit
   audit  <url>                                    stack-agnostic SEO / hygiene check of a live site
   report <domain> [--days 28]                     Search Console clicks, impressions, top queries
 
@@ -154,7 +154,9 @@ def step(st, name):
     def deco(fn):
         def run(*a, **k):
             if name in st["done"]: log(name, "already done"); return
-            if fn(*a, **k) is False: log(name, "not complete - will retry on next run"); return
+            r = fn(*a, **k)
+            if r == "skip": return  # optional step turned off: not marked done, so a later run can enable it
+            if r is False: log(name, "not complete - will retry on next run"); return
             st["done"].append(name); save_state(st)
         return run
     return deco
@@ -248,7 +250,7 @@ def cmd_launch(a):
 
     @step(st, "ga4")
     def s_ga4():
-        if a.no_ga: log("ga4", "skipped (--no-ga)"); return
+        if a.no_ga: log("ga4", "skipped (--no-ga)"); return "skip"
         base = "https://analyticsadmin.googleapis.com/v1beta"
         if "ga4_property" not in st:  # saved immediately so a re-run never creates a duplicate property
             prop = g("POST", f"{base}/properties", {"parent": f"accounts/{env('GA4_ACCOUNT_ID')}", "displayName": d,
@@ -261,6 +263,24 @@ def cmd_launch(a):
         vc("POST", f"/v10/projects/{st['vercel_project']}/env?upsert=true",
            {"key": a.ga_env, "value": mid, "type": "plain", "target": ["production", "preview"]})
         log("ga4", f"{prop['name']} stream {mid} -> Vercel env {a.ga_env}")
+
+    @step(st, "posthog")
+    def s_posthog():
+        if not (a.posthog or a.posthog_new): return "skip"
+        host = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com")  # ingestion host; EU: https://eu.i.posthog.com
+        if a.posthog_new:  # separate project per product - free PostHog orgs allow only one project
+            if "posthog_key" not in st:
+                app = host.replace(".i.posthog.com", ".posthog.com")
+                r = http("POST", f"{app}/api/organizations/{env('POSTHOG_ORG_ID')}/projects/", env("POSTHOG_PERSONAL_API_KEY"), {"name": d})
+                st["posthog_key"] = r["api_token"]; st["posthog_project"] = r.get("id"); save_state(st)
+            key = st["posthog_key"]; how = f"new project {st.get('posthog_project')}"
+        else:  # shared project: split products in PostHog by the $host property
+            key = env("POSTHOG_PROJECT_KEY"); how = "shared project (filter by $host)"
+        for k, v in (("NEXT_PUBLIC_POSTHOG_KEY", key), ("NEXT_PUBLIC_POSTHOG_HOST", host)):
+            vc("POST", f"/v10/projects/{st['vercel_project']}/env?upsert=true",
+               {"key": k, "value": v, "type": "plain", "target": ["production", "preview"]})
+        log("posthog", f"{how} -> Vercel env NEXT_PUBLIC_POSTHOG_KEY / _HOST")
+        if "deploy" in st["done"]: log("posthog", "site already deployed - push a commit (or redeploy) so the new env vars take effect")
 
     @step(st, "deploy")
     def s_deploy():
@@ -290,7 +310,7 @@ def cmd_launch(a):
             except HTTPError as e: log("sitemap", f"IndexNow failed: {e}")
         else: log("sitemap", "IndexNow skipped (INDEXNOW_KEY unset or /<key>.txt not served)")
 
-    for s in (s_domain, s_zone, s_vercel, s_dns, s_gsc, s_ga4, s_deploy, s_live, s_sitemap): s()
+    for s in (s_domain, s_zone, s_vercel, s_dns, s_gsc, s_ga4, s_posthog, s_deploy, s_live, s_sitemap): s()
     print(); fails = run_audit(f"https://{canon}", quiet=False)
     print(f"\nDone. State: state/{d}.json. {'Fix the FAIL lines above.' if fails else 'All critical checks passed.'}")
     print("One-time manual: in Bing Webmaster Tools, 'Import from Google Search Console' (covers all future sites).")
@@ -417,6 +437,8 @@ def main():
     l.add_argument("--sitemap", default="/sitemap.xml"); l.add_argument("--no-ga", action="store_true")
     l.add_argument("--ga-env", default="NEXT_PUBLIC_GA_ID", help="env var name your code reads the GA4 ID from")
     l.add_argument("--tz", default="Asia/Kolkata", help="GA4 reporting time zone")
+    l.add_argument("--posthog", action="store_true", help="wire PostHog using the shared project key in .env")
+    l.add_argument("--posthog-new", action="store_true", help="create a separate PostHog project (needs a paid PostHog org)")
     l.add_argument("--email", action="store_true", help="domain will send mail: skip SPF -all / DMARC reject")
     au = sub.add_parser("audit"); au.add_argument("url")
     rp = sub.add_parser("report"); rp.add_argument("domain"); rp.add_argument("--days", type=int, default=28)

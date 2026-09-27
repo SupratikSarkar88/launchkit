@@ -21,6 +21,7 @@ Not a coder? Install it as a Claude plugin and say *"launch my app"*. Claude wal
 | 4 | DNS records to Vercel; SPF/DMARC so nobody can spoof email from your domain | Cloudflare API |
 | 5 | Verify the domain with Google; add it to Search Console | Site Verification + Search Console APIs |
 | 6 | Create Google Analytics 4 and pass its ID to your app (`NEXT_PUBLIC_GA_ID`) | GA Admin API + Vercel API |
+| 6b | *Optional* `--posthog`: pass a PostHog project key to your app (`NEXT_PUBLIC_POSTHOG_KEY` / `_HOST`) for product analytics and session replay | Vercel API (+ PostHog API with `--posthog-new`) |
 | 7 | Deploy to production | Vercel API |
 | 8 | Wait until live; submit the sitemap; ping Bing via IndexNow | Search Console API, IndexNow |
 | 9 | Audit: titles, descriptions, canonical, social cards, robots, sitemap, redirects, 404s | plain HTTP |
@@ -45,7 +46,7 @@ launchkit checks these but can't write your code. Ask your AI builder for them b
 - `sitemap.xml` and `robots.txt` (with a `Sitemap:` line)
 - a unique `<title>`, meta description and canonical URL per page
 - Open Graph tags + a 1200×630 share image, `twitter:card`, `<html lang>`
-- analytics snippet reading `NEXT_PUBLIC_GA_ID`
+- analytics snippet reading `NEXT_PUBLIC_GA_ID` (and, if you use `--posthog`, the PostHog snippet reading `NEXT_PUBLIC_POSTHOG_KEY` / `NEXT_PUBLIC_POSTHOG_HOST`)
 - `/privacy` and `/terms` pages linked in the footer; unknown URLs return a real 404
 
 ## Use with Claude
@@ -57,7 +58,8 @@ This repo is also a Claude plugin (`.claude-plugin/` + `skills/launch-product`).
 - **Vercel's free Hobby plan is non-commercial only.** Once your app takes payments, move to Pro.
 - **GA4 uses cookies.** EU/UK visitors need a consent banner. Skip it with `--no-ga` if you use cookieless analytics.
 - **Cloudflare's registration API is in beta**: not every TLD is available, and renewals/transfers are dashboard-only.
-- Flags: `--canonical apex`, `--email` (domain will send mail), `--framework ''` (non-Next.js), `--no-ga`, `--tz`.
+- **PostHog's free plan allows one project.** `--posthog` reuses it for every app (split them by the `$host` property); `--posthog-new` creates a project per app and needs a paid PostHog org.
+- Flags: `--posthog`, `--posthog-new`, `--canonical apex`, `--email` (domain will send mail), `--framework ''` (non-Next.js), `--no-ga`, `--tz`.
 
 ## License
 

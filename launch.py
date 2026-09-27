@@ -2,7 +2,8 @@
 """launchkit - take a built product from "repo on GitHub" to "live, indexed, measured".
 
 Commands
-  check  <name> [name ...] [--tlds com,io,app]   availability + price (Cloudflare Registrar)
+  suggest <keywords ...> [--limit 20]            available domain ideas + price (Cloudflare Registrar)
+  check  <name> [name ...] [--tlds com,io,app]   availability + price for names you already have
   launch <domain> --repo owner/repo [--buy]       buy -> DNS -> Vercel -> Search Console -> GA4 [-> PostHog] -> sitemap -> audit
   audit  <url>                                    stack-agnostic SEO / hygiene check of a live site
   report <domain> [--days 28]                     Search Console clicks, impressions, top queries
@@ -411,6 +412,18 @@ def cmd_check(a):
               + ("" if r.get("registrable") else f"  {r.get('reason','')}"))
     print("\n  (Only TLDs in the Cloudflare Registrar API beta can be checked/bought this way.)\n")
 
+def cmd_suggest(a):
+    q = urllib.parse.quote(" ".join(a.keywords))
+    r = cf("GET", f"/accounts/{env('CF_ACCOUNT_ID')}/registrar/domain-search?q={q}&limit={a.limit}")
+    rows = (r.get("domains") if isinstance(r, dict) else r) or []
+    rows = [x for x in rows if x.get("registrable")]
+    if not rows: print("\n  No available suggestions - try other keywords.\n"); return
+    print(f"\n  Available names for: {' '.join(a.keywords)}\n\n  {'domain':<32} {'1st yr':>8} {'renew':>8}")
+    for x in rows:
+        p = x.get("pricing") or {}
+        print(f"  {x.get('name',''):<32} {str(p.get('registration_cost','-')):>8} {str(p.get('renewal_cost','-')):>8}")
+    print("\n  Next: python3 launch.py launch <domain> --repo <owner/repo> --buy\n")
+
 def cmd_report(a):
     from datetime import date, timedelta
     end = date.today() - timedelta(days=2); start = end - timedelta(days=a.days)
@@ -429,6 +442,7 @@ def main():
     load_env()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sg = sub.add_parser("suggest"); sg.add_argument("keywords", nargs="+"); sg.add_argument("--limit", type=int, default=20)
     c = sub.add_parser("check"); c.add_argument("names", nargs="+"); c.add_argument("--tlds", default="com,io,app,co")
     l = sub.add_parser("launch"); l.add_argument("domain"); l.add_argument("--repo", required=True, help="GitHub owner/repo")
     l.add_argument("--buy", action="store_true", help="allow purchasing the domain")
@@ -446,7 +460,7 @@ def main():
     if a.cmd == "audit":
         u = a.url if a.url.startswith("http") else f"https://{a.url}"
         print(f"\nAudit {u}\n"); sys.exit(1 if run_audit(u) else 0)
-    {"check": cmd_check, "launch": cmd_launch, "report": cmd_report}[a.cmd](a)
+    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "report": cmd_report}[a.cmd](a)
 
 if __name__ == "__main__":
     main()

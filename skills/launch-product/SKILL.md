@@ -14,7 +14,7 @@ If `.env` is missing or has empty keys, walk the user through README "One-time s
 Open their repo and check it ships: `sitemap.xml`, `robots.txt` with a `Sitemap:` line, per-page title / meta description / canonical, Open Graph tags with a 1200x630 image, `twitter:card`, `<html lang>`, an analytics snippet reading `NEXT_PUBLIC_GA_ID`, `/privacy` and `/terms` linked, and a real 404 for unknown URLs. List what's missing, offer to add it, and get it committed and pushed first.
 
 ## 2. Pick the name
-Ask for 3-10 name ideas (or suggest some from what the app does). Run `python3 launch.py check <names...>` and show the table. The user chooses.
+Ask what the app does, or for name ideas. Run `python3 launch.py suggest <2-4 keywords>` for available domains with prices, and `python3 launch.py check <names...>` for names the user already has in mind. Show the tables; the user chooses.
 
 ## 3. Launch
 State the exact domain and first-year price and get an explicit "yes, buy it". Only then run:

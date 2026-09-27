@@ -3,7 +3,8 @@
 **You built it with AI. Now ship it.** One command takes a finished web app from a GitHub repo to a live site that Google can find: domain, DNS, hosting, Search Console, analytics, sitemap, and a launch audit.
 
 ```bash
-python3 launch.py check myapp coolname                  # availability + price
+python3 launch.py suggest invoice tool                  # available name ideas + price
+python3 launch.py check myapp coolname                  # check names you already have
 python3 launch.py launch myapp.com --repo you/myapp --buy
 python3 launch.py audit myapp.com                       # any site, any stack
 python3 launch.py report myapp.com                      # Search Console clicks + top queries

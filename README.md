@@ -10,7 +10,7 @@ python3 launch.py audit myapp.com                       # any site, any stack
 python3 launch.py report myapp.com                      # Search Console clicks + top queries
 ```
 
-**On a Mac, just double-click `Launchkit.command`.** It opens a menu: suggest names, check names, launch, audit, report. First run creates `.env` and opens it for you. It always shows the price and asks you to type `BUY` before purchasing.
+**No commands to remember:** run `python3 launch.py` (or double-click `Launchkit.command` on a Mac) for a menu. Suggest or check names, **type the number of the one you like**, answer four yes/no questions, confirm the price by typing `BUY`, and it launches.
 
 Not a coder? Install it as a Claude plugin and say *"launch my app"*. Claude walks you through the rest (see [Use with Claude](#use-with-claude)).
 

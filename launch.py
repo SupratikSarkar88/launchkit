@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """launchkit - take a built product from "repo on GitHub" to "live, indexed, measured".
 
-Commands
+Commands (run with no arguments for an interactive menu)
   suggest <keywords ...> [--limit 20]            available domain ideas + price (Cloudflare Registrar)
   check  <name> [name ...] [--tlds com,io,app]   availability + price for names you already have
   launch <domain> --repo owner/repo [--buy]       buy -> DNS -> Vercel -> Search Console -> GA4 [-> PostHog] -> sitemap -> audit
@@ -401,28 +401,106 @@ def report_audit(res, quiet):
     return sum(1 for x in res if x[0] == "FAIL")
 
 # ---------------------------------------------------------------- other commands
-def cmd_check(a):
-    tlds = [t.strip(".") for t in a.tlds.split(",")]
-    names = [n.lower() if "." in n else f"{n.lower()}.{t}" for n in a.names for t in ([None] if "." in n else tlds)]
-    rows = cf_check(names)
-    print(f"\n  {'domain':<32} {'available':<10} {'1st yr':>8} {'renew':>8}")
-    for r in sorted(rows, key=lambda x: (not x.get("registrable"), x.get("name", ""))):
+def print_domains(rows, show_unavailable=True):
+    """Numbered table. Returns the available domains in the order shown, so a number picks one."""
+    avail = [r for r in rows if r.get("registrable")]
+    taken = [r for r in rows if not r.get("registrable")]
+    print(f"\n   #  {'domain':<32} {'1st yr':>8} {'renew':>8}")
+    for i, r in enumerate(avail, 1):
         p = r.get("pricing") or {}
-        print(f"  {r.get('name',''):<32} {'yes' if r.get('registrable') else 'no':<10} {str(p.get('registration_cost','-')):>8} {str(p.get('renewal_cost','-')):>8}"
-              + ("" if r.get("registrable") else f"  {r.get('reason','')}"))
-    print("\n  (Only TLDs in the Cloudflare Registrar API beta can be checked/bought this way.)\n")
+        print(f"  {i:>2}  {r.get('name',''):<32} {str(p.get('registration_cost','-')):>8} {str(p.get('renewal_cost','-')):>8}")
+    if show_unavailable:
+        for r in taken: print(f"   -  {r.get('name',''):<32} {'taken':>8}   {r.get('reason','')}")
+    if not avail: print("  (none available)")
+    return [(r["name"], (r.get("pricing") or {})) for r in avail]
+
+def check_names(names, tlds="com,io,app,co"):
+    tl = [t.strip(".") for t in tlds.split(",")]
+    full = [n.lower() if "." in n else f"{n.lower()}.{t}" for n in names for t in ([None] if "." in n else tl)]
+    return print_domains(sorted(cf_check(full), key=lambda x: x.get("name", "")))
+
+def suggest_names(keywords, limit=20):
+    q = urllib.parse.quote(" ".join(keywords))
+    r = cf("GET", f"/accounts/{env('CF_ACCOUNT_ID')}/registrar/domain-search?q={q}&limit={limit}")
+    rows = (r.get("domains") if isinstance(r, dict) else r) or []
+    print(f"\n  Available names for: {' '.join(keywords)}")
+    return print_domains(rows, show_unavailable=False)
+
+def cmd_check(a):
+    check_names(a.names, a.tlds); print("\n  Next: python3 launch.py launch <domain> --repo <owner/repo> --buy   (or run: python3 launch.py menu)\n")
 
 def cmd_suggest(a):
-    q = urllib.parse.quote(" ".join(a.keywords))
-    r = cf("GET", f"/accounts/{env('CF_ACCOUNT_ID')}/registrar/domain-search?q={q}&limit={a.limit}")
-    rows = (r.get("domains") if isinstance(r, dict) else r) or []
-    rows = [x for x in rows if x.get("registrable")]
-    if not rows: print("\n  No available suggestions - try other keywords.\n"); return
-    print(f"\n  Available names for: {' '.join(a.keywords)}\n\n  {'domain':<32} {'1st yr':>8} {'renew':>8}")
-    for x in rows:
-        p = x.get("pricing") or {}
-        print(f"  {x.get('name',''):<32} {str(p.get('registration_cost','-')):>8} {str(p.get('renewal_cost','-')):>8}")
-    print("\n  Next: python3 launch.py launch <domain> --repo <owner/repo> --buy\n")
+    suggest_names(a.keywords, a.limit); print("\n  Next: python3 launch.py launch <domain> --repo <owner/repo> --buy   (or run: python3 launch.py menu)\n")
+
+# ---------------------------------------------------------------- interactive menu
+def ask(q, default=""):
+    v = input(f"  {q}" + (f" [{default}]" if default else "") + ": ").strip()
+    return v or default
+
+def yes(q, default=True):
+    v = ask(q + (" (Y/n)" if default else " (y/N)")).lower()
+    return default if not v else v.startswith("y")
+
+def pick_and_launch(options):
+    if not options: return
+    v = ask("Type a number to launch that domain, or press Enter to go back")
+    if v.isdigit() and 1 <= int(v) <= len(options): launch_flow(options[int(v) - 1][0])
+
+def launch_flow(domain):
+    domain = domain.lower().strip()
+    print(f"\n  Launching {domain}\n")
+    missing = [k for k in ("CF_API_TOKEN", "CF_ACCOUNT_ID", "VERCEL_TOKEN", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
+               if not os.environ.get(k)]
+    if missing:
+        print(f"  Setup isn't finished - missing in .env: {', '.join(missing)}")
+        if "GOOGLE_REFRESH_TOKEN" in missing and len(missing) == 1: print("  Use menu option 6 (Connect Google) first.")
+        return
+    repo = ask("GitHub repo for this app (owner/repo)")
+    if "/" not in repo: print("  Need it as owner/repo, e.g. SupratikSarkar88/myapp"); return
+    ns = argparse.Namespace(domain=domain, repo=repo, buy=False, canonical="www", sitemap="/sitemap.xml",
+                            ga_env="NEXT_PUBLIC_GA_ID", tz="Asia/Kolkata", posthog_new=False,
+                            framework="nextjs" if yes("Is it a Next.js app?") else "",
+                            no_ga=not yes("Set up Google Analytics?"),
+                            posthog=yes("Set up PostHog (shared project)?", False),
+                            email=yes("Will this domain send email?", False))
+    if not cf_zone(domain):
+        info = (cf_check([domain]) or [{}])[0]
+        if not info.get("registrable"): print(f"\n  {domain} can't be bought: {info.get('reason', 'not available')}"); return
+        p = info.get("pricing") or {}
+        print(f"\n  {domain} costs {p.get('registration_cost')} {p.get('currency', 'USD')} for the first year "
+              f"(renews at {p.get('renewal_cost')}), charged to your Cloudflare payment method.")
+        if ask("Type BUY to purchase it and launch (anything else cancels)") != "BUY": print("  Cancelled - nothing was bought."); return
+        ns.buy = True
+    else:
+        print("  You already own this domain in Cloudflare - no purchase needed.")
+    cmd_launch(ns)
+
+def cmd_menu(_a=None):
+    items = [("Suggest domain names from keywords", "suggest"), ("Check names I already have", "check"),
+             ("Launch with a domain I've chosen", "launch"), ("Audit a live site", "audit"),
+             ("Search Console report", "report"), ("Connect / reconnect Google", "google")]
+    while True:
+        print("\n  ==========  launchkit  ==========")
+        for i, (label, _) in enumerate(items, 1): print(f"   {i}) {label}")
+        print("   q) Quit")
+        c = ask("Choose").lower()
+        if c in ("q", "quit", "exit"): return
+        if not c.isdigit() or not 1 <= int(c) <= len(items): continue
+        action = items[int(c) - 1][1]
+        try:
+            if action == "suggest": pick_and_launch(suggest_names(ask("Keywords (e.g. invoice tool)").split()))
+            elif action == "check": pick_and_launch(check_names(ask("Names, space separated (e.g. tinyinvoice quickbill.io)").split()))
+            elif action == "launch": launch_flow(ask("Domain (e.g. myapp.com)"))
+            elif action == "audit":
+                u = ask("Site (e.g. myapp.com)"); u = u if u.startswith("http") else f"https://{u}"
+                print(f"\n  Audit {u}\n"); run_audit(u)
+            elif action == "report": cmd_report(argparse.Namespace(domain=ask("Domain"), days=28))
+            elif action == "google":
+                import subprocess; subprocess.run([sys.executable, str(HERE / "google_auth_setup.py")])
+        except SystemExit: pass          # die() prints the error; stay in the menu
+        except KeyboardInterrupt: print("\n  Stopped.")
+        except Exception as e: print(f"\n  ERROR: {e}")
+        input("\n  Press Enter for the menu...")
 
 def cmd_report(a):
     from datetime import date, timedelta
@@ -456,11 +534,13 @@ def main():
     l.add_argument("--email", action="store_true", help="domain will send mail: skip SPF -all / DMARC reject")
     au = sub.add_parser("audit"); au.add_argument("url")
     rp = sub.add_parser("report"); rp.add_argument("domain"); rp.add_argument("--days", type=int, default=28)
+    sub.add_parser("menu")
+    if len(sys.argv) == 1: sys.argv.append("menu")   # no arguments = interactive menu
     a = ap.parse_args()
     if a.cmd == "audit":
         u = a.url if a.url.startswith("http") else f"https://{a.url}"
         print(f"\nAudit {u}\n"); sys.exit(1 if run_audit(u) else 0)
-    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "report": cmd_report}[a.cmd](a)
+    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "report": cmd_report, "menu": cmd_menu}[a.cmd](a)
 
 if __name__ == "__main__":
     main()

@@ -412,7 +412,9 @@ def cmd_connect(a):
     line(4, "sitemap", f"submit {sm} to Search Console; IndexNow ping if INDEXNOW_KEY is set and /<key>.txt is served")
     print("   5. audit          read-only checks of the live site")
     print("\n  Nothing else is touched: no A/AAAA/CNAME/MX/SPF/DMARC or other TXT records, no hosting, no Vercel.")
-    if input("\n  Proceed? Type y to continue: ").strip().lower() != "y": print("  Cancelled - nothing was changed."); return
+    try: go = input("\n  Proceed? Type y to continue: ").strip().lower() == "y"
+    except EOFError: go = False
+    if not go: print("  Cancelled - nothing was changed."); return
 
     st.update(mode="connect", canonical=canon); save_state(st)
 

@@ -8,6 +8,8 @@ Commands
   suggest <keywords ...> [--limit 20]            available domain ideas + price (Cloudflare Registrar)
   check  <name> [name ...] [--tlds com,io,app]   availability + price for names you already have
   launch <domain> --repo owner/repo [--buy]       buy -> DNS -> Vercel -> Search Console -> GA4 [-> PostHog] -> sitemap -> audit
+  connect <domain> [--canonical apex|www] [--no-ga] [--tz Asia/Kolkata]
+                                                  site already live on any host: Search Console -> GA4 -> sitemap -> audit
   audit  <url>                                    stack-agnostic SEO / hygiene check of a live site
   report <domain> [--days 28]                     Search Console clicks, impressions, top queries
 
@@ -166,6 +168,62 @@ def step(st, name):
         return run
     return deco
 
+# ---------------------------------------------------------------- shared steps (launch + connect)
+GA_ADMIN = "https://analyticsadmin.googleapis.com/v1beta"
+
+def do_zone(st, d):
+    z = poll(lambda: cf_zone(d), "Cloudflare zone", every=20, timeout=900)
+    st["zone_id"] = z["id"]; log("zone", f"zone {z['id']} status={z.get('status')}")
+
+def do_gsc(st, d, put_txt):
+    """Verify the domain with a DNS TXT record and add the Search Console domain property.
+    put_txt(zone_id, name, token) writes the record and returns a short status word."""
+    site = {"type": "INET_DOMAIN", "identifier": d}
+    tok = g("POST", "https://www.googleapis.com/siteVerification/v1/token",
+            {"site": site, "verificationMethod": "DNS_TXT"})["token"]
+    log("gsc", f"TXT {d}: {put_txt(st['zone_id'], d, tok)}")
+    def verified():
+        try:
+            g("POST", "https://www.googleapis.com/siteVerification/v1/webResource?verificationMethod=DNS_TXT", {"site": site})
+            return True
+        except HTTPError as e:
+            if e.status in (400, 403): return False
+            raise
+    poll(verified, "Google DNS verification", every=30, timeout=1800)
+    g("PUT", f"https://www.googleapis.com/webmasters/v3/sites/{gsc_site(d)}")
+    log("gsc", f"Search Console domain property sc-domain:{d} added")
+
+def do_ga4(st, d, canon, tz):
+    """Create the GA4 property (once) and a web stream; record both in state. Returns the measurement ID."""
+    if "ga4_property" not in st:  # saved immediately so a re-run never creates a duplicate property
+        prop = g("POST", f"{GA_ADMIN}/properties", {"parent": f"accounts/{env('GA4_ACCOUNT_ID')}", "displayName": d,
+                                                    "timeZone": tz, "currencyCode": "USD"})
+        st["ga4_property"] = prop["name"]; save_state(st)
+    stream = g("POST", f"{GA_ADMIN}/{st['ga4_property']}/dataStreams", {"type": "WEB_DATA_STREAM", "displayName": d,
+                                                                       "webStreamData": {"defaultUri": f"https://{canon}"}})
+    mid = stream["webStreamData"]["measurementId"]; st["ga4"] = {"property": st["ga4_property"], "measurement_id": mid}
+    return mid
+
+def sitemap_urls(sm, expand_index):
+    xml = fetch(sm)[2]
+    locs = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml)
+    if expand_index and "<sitemapindex" in xml:  # one level deep: page URLs, not child sitemap URLs
+        locs = [u for child in locs for u in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", fetch(child)[2])]
+    return locs[:10000]
+
+def do_sitemap(d, canon, sm, expand_index):
+    if fetch(sm)[0] != 200: log("sitemap", f"{sm} not found - add one to the repo, then re-run"); return False
+    g("PUT", f"https://www.googleapis.com/webmasters/v3/sites/{gsc_site(d)}/sitemaps/{urllib.parse.quote(sm, safe='')}")
+    log("sitemap", f"submitted {sm} to Search Console")
+    key = os.environ.get("INDEXNOW_KEY")
+    if key and fetch(f"https://{canon}/{key}.txt")[0] == 200:
+        urls = sitemap_urls(sm, expand_index)
+        try:
+            http("POST", "https://api.indexnow.org/indexnow", body={"host": canon, "key": key, "urlList": urls})
+            log("sitemap", f"IndexNow (Bing, Yandex, ...) pinged with {len(urls)} URLs")
+        except HTTPError as e: log("sitemap", f"IndexNow failed: {e}")
+    else: log("sitemap", "IndexNow skipped (INDEXNOW_KEY unset or /<key>.txt not served)")
+
 def cmd_launch(a):
     d = a.domain.lower().strip(); st = load_state(d)
     canon = f"www.{d}" if a.canonical == "www" else d
@@ -192,9 +250,7 @@ def cmd_launch(a):
         poll(done, "registration", every=20, timeout=1800)
 
     @step(st, "zone")
-    def s_zone():
-        z = poll(lambda: cf_zone(d), "Cloudflare zone", every=20, timeout=900)
-        st["zone_id"] = z["id"]; log("zone", f"zone {z['id']} status={z.get('status')}")
+    def s_zone(): do_zone(st, d)
 
     @step(st, "vercel")
     def s_vercel():
@@ -238,36 +294,15 @@ def cmd_launch(a):
 
     @step(st, "gsc")
     def s_gsc():
-        site = {"type": "INET_DOMAIN", "identifier": d}
-        tok = g("POST", "https://www.googleapis.com/siteVerification/v1/token",
-                {"site": site, "verificationMethod": "DNS_TXT"})["token"]
-        log("gsc", f"TXT {d}: {cf_upsert(st['zone_id'], 'TXT', d, tok, match='google-site-verification')}")
-        def verified():
-            try:
-                g("POST", "https://www.googleapis.com/siteVerification/v1/webResource?verificationMethod=DNS_TXT", {"site": site})
-                return True
-            except HTTPError as e:
-                if e.status in (400, 403): return False
-                raise
-        poll(verified, "Google DNS verification", every=30, timeout=1800)
-        g("PUT", f"https://www.googleapis.com/webmasters/v3/sites/{gsc_site(d)}")
-        log("gsc", f"Search Console domain property sc-domain:{d} added")
+        do_gsc(st, d, lambda z, name, tok: cf_upsert(z, 'TXT', name, tok, match='google-site-verification'))
 
     @step(st, "ga4")
     def s_ga4():
         if a.no_ga: log("ga4", "skipped (--no-ga)"); return "skip"
-        base = "https://analyticsadmin.googleapis.com/v1beta"
-        if "ga4_property" not in st:  # saved immediately so a re-run never creates a duplicate property
-            prop = g("POST", f"{base}/properties", {"parent": f"accounts/{env('GA4_ACCOUNT_ID')}", "displayName": d,
-                                                       "timeZone": a.tz, "currencyCode": "USD"})
-            st["ga4_property"] = prop["name"]; save_state(st)
-        prop = {"name": st["ga4_property"]}
-        stream = g("POST", f"{base}/{prop['name']}/dataStreams", {"type": "WEB_DATA_STREAM", "displayName": d,
-                                                                  "webStreamData": {"defaultUri": f"https://{canon}"}})
-        mid = stream["webStreamData"]["measurementId"]; st["ga4"] = {"property": prop["name"], "measurement_id": mid}
+        mid = do_ga4(st, d, canon, a.tz)
         vc("POST", f"/v10/projects/{st['vercel_project']}/env?upsert=true",
            {"key": a.ga_env, "value": mid, "type": "plain", "target": ["production", "preview"]})
-        log("ga4", f"{prop['name']} stream {mid} -> Vercel env {a.ga_env}")
+        log("ga4", f"{st['ga4_property']} stream {mid} -> Vercel env {a.ga_env}")
 
     @step(st, "posthog")
     def s_posthog():
@@ -301,24 +336,110 @@ def cmd_launch(a):
         log("live", f"https://{canon} is up")
 
     @step(st, "sitemap")
-    def s_sitemap():
-        sm = f"https://{canon}{a.sitemap}"
-        if fetch(sm)[0] != 200: log("sitemap", f"{sm} not found - add one to the repo, then re-run"); return False
-        g("PUT", f"https://www.googleapis.com/webmasters/v3/sites/{gsc_site(d)}/sitemaps/{urllib.parse.quote(sm, safe='')}")
-        log("sitemap", f"submitted {sm} to Search Console")
-        key = os.environ.get("INDEXNOW_KEY")
-        if key and fetch(f"https://{canon}/{key}.txt")[0] == 200:
-            urls = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", fetch(sm)[2])[:10000]
-            try:
-                http("POST", "https://api.indexnow.org/indexnow", body={"host": canon, "key": key, "urlList": urls})
-                log("sitemap", f"IndexNow (Bing, Yandex, ...) pinged with {len(urls)} URLs")
-            except HTTPError as e: log("sitemap", f"IndexNow failed: {e}")
-        else: log("sitemap", "IndexNow skipped (INDEXNOW_KEY unset or /<key>.txt not served)")
+    def s_sitemap(): return do_sitemap(d, canon, f"https://{canon}{a.sitemap}", expand_index=False)
 
     for s in (s_domain, s_zone, s_vercel, s_dns, s_gsc, s_ga4, s_posthog, s_deploy, s_live, s_sitemap): s()
     print(); fails = run_audit(f"https://{canon}", quiet=False)
     print(f"\nDone. State: state/{d}.json. {'Fix the FAIL lines above.' if fails else 'All critical checks passed.'}")
     print("One-time manual: in Bing Webmaster Tools, 'Import from Google Search Console' (covers all future sites).")
+
+# ---------------------------------------------------------------- connect (site already live on any host)
+def cf_add_txt(zone_id, name, content):
+    """Add a TXT record only if that exact value isn't there yet. Never edits or deletes other records."""
+    recs = cf("GET", f"/zones/{zone_id}/dns_records?type=TXT&name={name}") or []
+    if any(r["content"].strip('"') == content for r in recs): return "unchanged"
+    cf("POST", f"/zones/{zone_id}/dns_records", {"type": "TXT", "name": name, "content": content, "ttl": 1})
+    return "created"
+
+def gsc_owned(d):
+    try: sites = g("GET", "https://www.googleapis.com/webmasters/v3/sites").get("siteEntry", [])
+    except HTTPError: return False
+    return any(s.get("siteUrl") == f"sc-domain:{d}" and s.get("permissionLevel") == "siteOwner" for s in sites)
+
+def ga4_find(d, canon):
+    """Existing GA4 property named after the domain, and its web stream for the canonical host, if any."""
+    try:
+        props = g("GET", f"{GA_ADMIN}/properties?filter=parent:accounts/{env('GA4_ACCOUNT_ID')}&pageSize=200").get("properties", [])
+    except HTTPError: return None, None
+    prop = next((p for p in props if p.get("displayName") in (d, canon)), None)
+    if not prop: return None, None
+    try: streams = g("GET", f"{GA_ADMIN}/{prop['name']}/dataStreams").get("dataStreams", [])
+    except HTTPError: streams = []
+    host = lambda s: urllib.parse.urlparse((s.get("webStreamData") or {}).get("defaultUri", "")).netloc
+    stream = next((s for s in streams if s.get("type") == "WEB_DATA_STREAM" and host(s) in (d, canon)), None)
+    return prop["name"], (stream["webStreamData"]["measurementId"] if stream else None)
+
+def find_sitemap(canon, path):
+    if path: return f"https://{canon}{path}"
+    s, _, robots, _ = fetch(f"https://{canon}/robots.txt")
+    listed = re.findall(r"(?im)^sitemap:\s*(\S+)", robots) if s == 200 else []
+    for sm in listed + [f"https://{canon}/sitemap.xml", f"https://{canon}/sitemap-index.xml"]:
+        if fetch(sm)[0] == 200: return sm
+    return f"https://{canon}/sitemap.xml"
+
+def cmd_connect(a):
+    """Search Console + GA4 + sitemap for a domain that already serves a site on any host. No hosting or Vercel calls."""
+    d = a.domain.lower().strip().removeprefix("https://").removeprefix("http://").strip("/")
+    d = d.removeprefix("www.")
+    canon = f"www.{d}" if a.canonical == "www" else d
+    connect_accounts(want_ga=not a.no_ga, want_vercel=False)
+    st = load_state(d)
+
+    # read-only discovery, so the plan can say exactly what will change
+    print(f"\nConnect {d}  (canonical https://{canon})\n")
+    status, hdr, _, _ = fetch(f"https://{canon}/")
+    if status != 200: die(f"https://{canon}/ returned {status} - connect is for sites that are already live")
+    server = {k.lower(): v for k, v in hdr.items()}.get("server", "unknown")
+    z = cf_zone(d)
+    if not z: die(f"no Cloudflare zone for {d} in this account - connect needs it to add the Google verification TXT record")
+    owned = "gsc" in st["done"] or gsc_owned(d)
+    vtxt = [r for r in cf("GET", f"/zones/{z['id']}/dns_records?type=TXT&name={d}") or []
+            if r["content"].strip('"').startswith("google-site-verification")]
+    prop, mid = (None, None) if a.no_ga or "ga4" in st["done"] else ga4_find(d, canon)
+    sm = find_sitemap(canon, a.sitemap)
+
+    def line(n, name, text): print(f"   {n}. {name:<14} {'already done' if name in st['done'] else text}")
+    print(f"  Live now: https://{canon}/ -> 200 (server: {server}). Hosting and DNS routing are left exactly as they are.\n")
+    print("  Plan:")
+    line(1, "zone", f"use Cloudflare zone {z['id']} (read only)")
+    line(2, "gsc", "already verified in Search Console - no DNS change" if owned else
+         f"add ONE TXT record on {d}: google-site-verification=<token> ({len(vtxt)} existing verification record(s) kept as is), "
+         f"then add Search Console property sc-domain:{d}")
+    if a.no_ga: line(3, "ga4", "skipped (--no-ga)")
+    elif prop and mid: line(3, "ga4", f"reuse existing property {prop} and web stream {mid}")
+    elif prop: line(3, "ga4", f"reuse existing property {prop}, create a web stream for https://{canon}")
+    else: line(3, "ga4", f"create GA4 property '{d}' (time zone {a.tz}) and a web stream for https://{canon}")
+    line(4, "sitemap", f"submit {sm} to Search Console; IndexNow ping if INDEXNOW_KEY is set and /<key>.txt is served")
+    print("   5. audit          read-only checks of the live site")
+    print("\n  Nothing else is touched: no A/AAAA/CNAME/MX/SPF/DMARC or other TXT records, no hosting, no Vercel.")
+    if input("\n  Proceed? Type y to continue: ").strip().lower() != "y": print("  Cancelled - nothing was changed."); return
+
+    st.update(mode="connect", canonical=canon); save_state(st)
+
+    @step(st, "zone")
+    def s_zone(): do_zone(st, d)
+
+    @step(st, "gsc")
+    def s_gsc():
+        if gsc_owned(d): log("gsc", f"sc-domain:{d} already verified - no DNS change"); return
+        do_gsc(st, d, cf_add_txt)
+
+    @step(st, "ga4")
+    def s_ga4():
+        if a.no_ga: log("ga4", "skipped (--no-ga)"); return "skip"
+        if prop and "ga4_property" not in st: st["ga4_property"] = prop; save_state(st)
+        if mid: st["ga4"] = {"property": st["ga4_property"], "measurement_id": mid}; m = mid
+        else: m = do_ga4(st, d, canon, a.tz)
+        save_state(st)
+        log("ga4", f"{st['ga4_property']} measurement ID {m} (saved to state/{d}.json)")
+
+    @step(st, "sitemap")
+    def s_sitemap(): return do_sitemap(d, canon, sm, expand_index=True)
+
+    for s in (s_zone, s_gsc, s_ga4, s_sitemap): s()
+    print(); fails = run_audit(f"https://{canon}", quiet=False)
+    if st.get("ga4"): print(f"\n  GA4 measurement ID: {st['ga4']['measurement_id']}  (put it in your site's analytics config)")
+    print(f"\nDone. State: state/{d}.json. {'Fix the FAIL lines above.' if fails else 'All critical checks passed.'}")
 
 # ---------------------------------------------------------------- audit
 class Head(HTMLParser):
@@ -574,12 +695,12 @@ def connect_ga4():
         v = ask("Which Analytics account", "1"); pick = accts[int(v) - 1] if v.isdigit() and 1 <= int(v) <= len(accts) else accts[0]
     set_env("GA4_ACCOUNT_ID", pick["name"].split("/")[-1]); return True
 
-def connect_accounts(want_ga=True, want_posthog=False):
+def connect_accounts(want_ga=True, want_posthog=False, want_vercel=True):
     """Ask for whatever access is missing. Each piece is asked once and saved to .env."""
     if not (HERE / ".env").exists() and (HERE / ".env.example").exists(): (HERE / ".env").write_text((HERE / ".env.example").read_text())
     load_env()
     if not (os.environ.get("CF_API_TOKEN") and os.environ.get("CF_ACCOUNT_ID")): connect_cloudflare()
-    if not os.environ.get("VERCEL_TOKEN"): connect_vercel()
+    if want_vercel and not os.environ.get("VERCEL_TOKEN"): connect_vercel()
     if not (os.environ.get("GOOGLE_CLIENT_ID") and os.environ.get("GOOGLE_CLIENT_SECRET")): connect_google_client()
     if not os.environ.get("GOOGLE_REFRESH_TOKEN"): google_login()
     ga_ok = True
@@ -615,7 +736,8 @@ def launch_flow(domain):
 
 def cmd_menu(_a=None):
     items = [("Suggest domain names from keywords", "suggest"), ("Check names I already have", "check"),
-             ("Launch with a domain I've chosen", "launch"), ("Audit a live site", "audit"),
+             ("Launch with a domain I've chosen", "launch"),
+             ("Already live somewhere else? Connect Search Console + GA4", "connect"), ("Audit a live site", "audit"),
              ("Search Console report", "report"), ("Connect accounts / reconnect Google", "google")]
     while True:
         print("\n  ==========  launchkit  ==========")
@@ -629,6 +751,11 @@ def cmd_menu(_a=None):
             if action == "suggest": pick_and_launch(suggest_names(ask("Keywords (e.g. invoice tool)").split()))
             elif action == "check": pick_and_launch(check_names(ask("Names, space separated (e.g. tinyinvoice quickbill.io)").split()))
             elif action == "launch": launch_flow(ask("Domain (e.g. myapp.com)"))
+            elif action == "connect":
+                dom = ask("Domain (e.g. myapp.com)")
+                canon = "www" if yes("Is the www address the main one (www.example.com)?", False) else "apex"
+                cmd_connect(argparse.Namespace(domain=dom, canonical=canon, no_ga=not yes("Set up Google Analytics?"),
+                                               tz="Asia/Kolkata", sitemap=""))
             elif action == "audit":
                 u = ask("Site (e.g. myapp.com)"); u = u if u.startswith("http") else f"https://{u}"
                 print(f"\n  Audit {u}\n"); run_audit(u)
@@ -670,6 +797,10 @@ def main():
     l.add_argument("--posthog", action="store_true", help="wire PostHog using the shared project key in .env")
     l.add_argument("--posthog-new", action="store_true", help="create a separate PostHog project (needs a paid PostHog org)")
     l.add_argument("--email", action="store_true", help="domain will send mail: skip SPF -all / DMARC reject")
+    cn = sub.add_parser("connect", help="site already live on any host: Search Console + GA4 + sitemap, no hosting changes")
+    cn.add_argument("domain"); cn.add_argument("--canonical", choices=["www", "apex"], default="apex")
+    cn.add_argument("--no-ga", action="store_true"); cn.add_argument("--tz", default="Asia/Kolkata", help="GA4 reporting time zone")
+    cn.add_argument("--sitemap", default="", help="sitemap path; default: robots.txt Sitemap line, then /sitemap.xml, /sitemap-index.xml")
     au = sub.add_parser("audit"); au.add_argument("url")
     rp = sub.add_parser("report"); rp.add_argument("domain"); rp.add_argument("--days", type=int, default=28)
     sub.add_parser("menu"); sub.add_parser("setup")
@@ -682,7 +813,7 @@ def main():
     if a.cmd == "audit":
         u = a.url if a.url.startswith("http") else f"https://{a.url}"
         print(f"\nAudit {u}\n"); sys.exit(1 if run_audit(u) else 0)
-    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "report": cmd_report, "menu": cmd_menu,
+    {"suggest": cmd_suggest, "check": cmd_check, "launch": cmd_launch, "connect": cmd_connect, "report": cmd_report, "menu": cmd_menu,
      "setup": lambda _a: connect_accounts()}[a.cmd](a)
 
 if __name__ == "__main__":

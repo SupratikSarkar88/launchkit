@@ -6,6 +6,7 @@
 python3 launch.py suggest invoice tool                  # available name ideas + price
 python3 launch.py check myapp coolname                  # check names you already have
 python3 launch.py launch myapp.com --repo you/myapp --buy
+python3 launch.py connect mysite.com --canonical apex   # already live elsewhere: Search Console + GA4 only
 python3 launch.py audit myapp.com                       # any site, any stack
 python3 launch.py report myapp.com                      # Search Console clicks + top queries
 ```
@@ -36,6 +37,24 @@ Not a coder? Install it as a Claude plugin and say *"launch my app"*. Claude wal
 | 9 | Audit: titles, descriptions, canonical, social cards, robots, sitemap, redirects, 404s | plain HTTP |
 
 Every step is saved to `state/<domain>.json`. If anything fails, run the same command again and it continues where it stopped. Python 3.9+, no dependencies.
+
+## Already live somewhere else?
+
+If the domain already serves a site on any host (Cloudflare Workers, Netlify, your own server, ...), use `connect` instead of `launch`. It never buys a domain, never calls Vercel and never touches hosting.
+
+```bash
+python3 launch.py connect mysite.com [--canonical apex|www] [--no-ga] [--tz Asia/Kolkata] [--sitemap /sitemap.xml]
+```
+
+| # | Step | How |
+|---|------|-----|
+| 1 | Find the domain's DNS zone (read only) | Cloudflare API |
+| 2 | Verify the domain with Google and add the Search Console domain property. Skipped if you already own it | Site Verification + Search Console APIs |
+| 3 | Create a GA4 property and web stream (or reuse one already named after the domain) and print the measurement ID | GA Admin API |
+| 4 | Submit the sitemap (from `robots.txt`, else `/sitemap.xml`, else `/sitemap-index.xml`); ping IndexNow | Search Console API, IndexNow |
+| 5 | Audit | plain HTTP |
+
+It prints the full plan first and changes nothing until you type `y`. The only DNS change it can make is **adding** one `google-site-verification` TXT record on the apex; it never creates, edits or deletes A, AAAA, CNAME, MX, SPF, DMARC or any other record. The measurement ID is saved in `state/<domain>.json`; put it in your site's analytics config yourself. Like `launch`, re-running continues where it stopped.
 
 ## One-time setup (~30 minutes)
 
